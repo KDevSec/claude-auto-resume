@@ -2,7 +2,7 @@
 
 [![BMAD](https://bmad-badge.vercel.app/terryso/claude-auto-resume.svg)](https://github.com/bmad-code-org/BMAD-METHOD)
 
-A shell script utility that automatically resumes Claude CLI tasks when usage limits are lifted, or executes custom shell commands after waiting periods. It detects Claude usage restrictions, waits intelligently, and resumes task execution automatically.
+A shell script utility that automatically resumes Claude CLI tasks when usage limits are lifted, or executes custom shell commands after waiting periods. **v2.0 adds multi-session support**: auto-discover all sessions in a project, resume specific sessions by name or ID, and resume all sessions sequentially or in parallel.
 
 English | [中文](README_zh.md)
 
@@ -37,6 +37,7 @@ This script is particularly useful when using Claude Code for development in the
 1. **Task Interrupted by Usage Limits**: When your Claude Code shows `Claude usage limit reached.` but your task is not yet completely finished
 2. **Automatic Task Resumption**: Simply run `claude-auto-resume` in your project's root directory, and when the usage limit is lifted, the script will automatically let Claude Code continue executing your previously unfinished task
 3. **Custom Command Execution**: Execute any shell command after waiting for usage limits, useful for restarting services, running builds, or processing data
+4. **🆕 Multi-Session Recovery**: When you have multiple parallel Claude sessions in the same project and all hit the limit, `--resume-all` discovers and resumes every session automatically
 
 ## Features
 
@@ -49,6 +50,7 @@ This script is particularly useful when using Claude Code for development in the
 - 🧪 Built-in test mode for development and validation
 - 🖥️ Cross-platform support (Linux/macOS/Windows PowerShell)
 - 📦 Zero external dependencies (only standard Unix tools required)
+- 🆕 **v2.0**: Multi-session discovery & batch resume (`--discover`, `--resume-all`, `--parallel`)
 
 ## Installation
 
@@ -145,6 +147,26 @@ claude-auto-resume --cmd "python app.py"
 
 # Show help
 claude-auto-resume --help
+
+# ===== NEW in v2.0: Session Management =====
+
+# Discover all sessions in current project
+claude-auto-resume --discover
+
+# Resume a specific session by name
+claude-auto-resume --resume "auth-module"
+
+# Resume a specific session by ID
+claude-auto-resume --resume "abc123de-f456-7890-abcd-ef1234567890"
+
+# Auto-discover & resume ALL sessions (sequential)
+claude-auto-resume --resume-all
+
+# Resume ALL sessions in parallel
+claude-auto-resume --resume-all --parallel
+
+# Resume all with custom prompt
+claude-auto-resume --resume-all --prompt-all "continue where you left off"
 ```
 
 ### Local Usage (Before Installation)
@@ -173,12 +195,15 @@ chmod +x claude-auto-resume.sh
 3. **Calculate Wait Time**: Calculate required wait time based on timestamp
 4. **Display Countdown**: Show real-time remaining wait time
 5. **Auto Resume**: Automatically execute either:
-   - `claude --dangerously-skip-permissions -p "<custom-prompt>"` (new session, default)
-   - `claude -c --dangerously-skip-permissions -p "<custom-prompt>"` (continue conversation with -c flag)
+   - `claude --dangerously-skip-permissions -p "<prompt>"` (new session, default)
+   - `claude -c --dangerously-skip-permissions -p "<prompt>"` (continue with -c)
+   - **🆕 `claude --resume <id> --dangerously-skip-permissions -p "<prompt>"`** (specific session by name/ID)
+   - **🆕 Multiple `claude --resume <id>` calls** (batch with `--resume-all`, sequential or parallel)
    - Custom shell command with `-e/--execute` or `--cmd` flags
 
 ## Command Line Options
 
+### Core Options
 - **No arguments**: Start new session with default prompt "continue"
 - **Single argument**: Start new session with custom prompt (e.g., `claude-auto-resume "implement feature"`)
 - **-p, --prompt**: Specify custom prompt with flag (e.g., `claude-auto-resume -p "write tests"`)
@@ -189,6 +214,13 @@ chmod +x claude-auto-resume.sh
 - **-h, --help**: Show help message and usage examples
 - **-v, --version**: Show version information
 - **--check**: Show system check information
+
+### 🆕 Session Management (v2.0)
+- **--discover**: List all saved sessions in the current project with IDs, names, sizes, and prompts
+- **--resume \<name|id\>**: Resume a specific session by display name or session ID
+- **--resume-all**: Auto-discover all sessions in the project and resume them after the limit lifts
+- **--parallel**: Used with `--resume-all` to resume all sessions in parallel instead of sequentially
+- **--prompt-all \<prompt\>**: Custom prompt for all sessions when using `--resume-all` (default: "continue")
 
 ## Session Types
 
@@ -206,6 +238,24 @@ Uses `claude -c` to continue the last conversation:
 claude-auto-resume -c "keep going"           # Continue with custom prompt
 claude-auto-resume -c -p "resume work"       # Continue with flag
 ```
+
+### 🆕 Resume Specific Session (v2.0)
+Resume a named or ID-identified session precisely:
+```bash
+claude-auto-resume --resume "auth-module"                       # By display name
+claude-auto-resume --resume "abc123de-f456-7890"                # By session ID
+```
+
+### 🆕 Batch Resume All Sessions (v2.0)
+Discover all sessions in the current project and resume them automatically:
+```bash
+claude-auto-resume --discover                                    # List all sessions first
+claude-auto-resume --resume-all                                  # Resume all (sequential)
+claude-auto-resume --resume-all --parallel                       # Resume all (parallel)
+claude-auto-resume --resume-all --prompt-all "pick up work"      # Custom prompt
+```
+
+**How session discovery works**: The script encodes the current directory path (replacing `\`, `/`, `:` with `-`) to locate `~/.claude/projects/<encoded-path>/`, then reads all `.jsonl` session files. It also attempts to resolve human-readable session names from Claude's metadata storage (`~/.claude/session-env/` and `~/.claude/sessions/`).
 
 ### Execute Custom Commands
 Execute any shell command after the wait period:
@@ -307,7 +357,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Credits
 
 - Original project and Bash implementation by terryso: https://github.com/terryso/claude-auto-resume
-- Windows PowerShell port and Windows installation notes added in this fork
+- Windows PowerShell port added in this fork by [KDevSec](https://github.com/KDevSec)
+- **v2.0** multi-session management (`--discover`, `--resume`, `--resume-all`, `--parallel`) by [KDevSec](https://github.com/KDevSec)
 
 ## Support
 

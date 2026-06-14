@@ -1,6 +1,6 @@
 # Claude Auto-Resume
 
-一个 Shell 脚本工具，可在 Claude CLI 使用限制解除后自动恢复任务，或在等待期后执行自定义 Shell 命令。它能检测 Claude 使用限制，智能等待，并自动恢复任务执行。
+一个 Shell 脚本工具，可在 Claude CLI 使用限制解除后自动恢复任务，或在等待期后执行自定义 Shell 命令。**v2.0 新增多会话支持**：自动发现项目中所有会话，按名称或 ID 恢复指定会话，批量依次或并行恢复全部会话。
 
 [English](README.md) | 中文
 
@@ -29,6 +29,7 @@
 1. **任务被使用限制中断**：当您的 Claude Code 显示 `Claude usage limit reached.` 但您的任务尚未完全完成时
 2. **自动任务恢复**：只需在项目根目录中运行 `claude-auto-resume`，当使用限制解除后，脚本将自动让 Claude Code 继续执行您之前未完成的任务
 3. **自定义命令执行**：在等待使用限制解除后执行任何 Shell 命令，适用于重启服务、运行构建或处理数据
+4. **🆕 多会话恢复**：同一项目中有多个并行 Claude 会话同时触发限制时，`--resume-all` 一键发现并恢复全部会话
 
 ## 特性
 
@@ -41,6 +42,7 @@
 - 🧪 内置测试模式用于开发和验证
 - 🖥️ 跨平台支持（Linux/macOS/Windows PowerShell）
 - 📦 零外部依赖（仅需标准 Unix 工具）
+- 🆕 **v2.0**：多会话发现与批量恢复（`--discover`、`--resume-all`、`--parallel`）
 
 ## 安装
 
@@ -137,6 +139,26 @@ claude-auto-resume --cmd "python app.py"
 
 # 显示帮助
 claude-auto-resume --help
+
+# ===== v2.0 新增：会话管理 =====
+
+# 发现当前项目所有会话
+claude-auto-resume --discover
+
+# 按名称恢复指定会话
+claude-auto-resume --resume "auth-module"
+
+# 按会话 ID 恢复指定会话
+claude-auto-resume --resume "abc123de-f456-7890-abcd-ef1234567890"
+
+# 自动发现并恢复全部会话（依次执行）
+claude-auto-resume --resume-all
+
+# 并行恢复全部会话
+claude-auto-resume --resume-all --parallel
+
+# 批量恢复并指定统一提示词
+claude-auto-resume --resume-all --prompt-all "继续未完成的任务"
 ```
 
 ### 本地使用（安装前）
@@ -165,12 +187,15 @@ chmod +x claude-auto-resume.sh
 3. **计算等待时间**：根据时间戳计算所需等待时间
 4. **显示倒计时**：实时显示剩余等待时间
 5. **自动恢复**：自动执行以下命令之一：
-   - `claude --dangerously-skip-permissions -p "<custom-prompt>"` （新会话，默认）
-   - `claude -c --dangerously-skip-permissions -p "<custom-prompt>"` （使用 -c 标志继续对话）
+   - `claude --dangerously-skip-permissions -p "<提示词>"` （新会话，默认）
+   - `claude -c --dangerously-skip-permissions -p "<提示词>"` （使用 -c 继续上次对话）
+   - **🆕 `claude --resume <id> --dangerously-skip-permissions -p "<提示词>"`** （按名称/ID 恢复指定会话）
+   - **🆕 多次 `claude --resume <id>` 调用**（`--resume-all` 批量恢复，支持依次/并行）
    - 使用 `-e/--execute` 或 `--cmd` 标志执行自定义 Shell 命令
 
 ## 命令行选项
 
+### 基础选项
 - **无参数**：使用默认提示"continue"开始新会话
 - **单一参数**：使用自定义提示开始新会话（例如，`claude-auto-resume "implement feature"`）
 - **-p, --prompt**：使用标志指定自定义提示（例如，`claude-auto-resume -p "write tests"`）
@@ -181,6 +206,13 @@ chmod +x claude-auto-resume.sh
 - **-h, --help**：显示帮助信息和使用示例
 - **-v, --version**：显示版本信息
 - **--check**：显示系统检查信息
+
+### 🆕 会话管理（v2.0 新增）
+- **--discover**：列出当前项目所有已保存的会话（含 ID、名称、大小、提示词）
+- **--resume \<名称|ID\>**：按显示名称或会话 ID 恢复指定会话
+- **--resume-all**：自动发现项目所有会话，额度恢复后全部恢复
+- **--parallel**：配合 `--resume-all` 使用，并行恢复所有会话（默认依次执行）
+- **--prompt-all \<提示词\>**：配合 `--resume-all` 统一指定提示词（默认为 "continue"）
 
 ## 会话类型
 
@@ -198,6 +230,24 @@ claude-auto-resume -p "write tests"   # 使用标志开始新会话
 claude-auto-resume -c "keep going"           # 使用自定义提示继续对话
 claude-auto-resume -c -p "resume work"       # 使用标志继续对话
 ```
+
+### 🆕 恢复指定会话（v2.0 新增）
+按名称或会话 ID 精确恢复：
+```bash
+claude-auto-resume --resume "auth-module"                       # 按名称恢复
+claude-auto-resume --resume "abc123de-f456-7890"                # 按 ID 恢复
+```
+
+### 🆕 批量恢复全部会话（v2.0 新增）
+自动发现当前项目所有会话，额度恢复后统一恢复：
+```bash
+claude-auto-resume --discover                                    # 先列出所有会话
+claude-auto-resume --resume-all                                  # 全部恢复（依次执行）
+claude-auto-resume --resume-all --parallel                       # 全部恢复（并行执行）
+claude-auto-resume --resume-all --prompt-all "继续之前的任务"     # 统一提示词
+```
+
+**会话发现原理**：脚本将当前目录路径编码（将 `\`、`/`、`:` 替换为 `-`），定位 `~/.claude/projects/<编码路径>/` 目录，读取其中所有 `.jsonl` 会话文件。同时尝试从 Claude 元数据存储（`~/.claude/session-env/` 和 `~/.claude/sessions/`）解析人类可读的会话名称。
 
 ### 执行自定义命令
 等待期后执行任何 Shell 命令：
@@ -298,7 +348,8 @@ claude-auto-resume/
 ## 致谢
 
 - 原始项目与 Bash 实现作者：terryso（https://github.com/terryso/claude-auto-resume）
-- 本 fork 增加 Windows PowerShell 版本与 Windows 安装说明
+- Windows PowerShell 版本由 [KDevSec](https://github.com/KDevSec) 在本 fork 中新增
+- **v2.0** 多会话管理功能（`--discover`、`--resume`、`--resume-all`、`--parallel`）由 [KDevSec](https://github.com/KDevSec) 开发
 
 ## 支持
 
