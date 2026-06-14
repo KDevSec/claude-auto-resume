@@ -4,12 +4,23 @@
 # Depends only on standard shell commands and claude CLI
 
 # Version information
-VERSION="1.5.0"
+VERSION="2.0.0"
 
 # Default prompt to use when resuming
 DEFAULT_PROMPT="continue"
 # Default is to start new session (no -c flag)
 USE_CONTINUE_FLAG=false
+# Resume specific session by name or ID
+USE_RESUME_FLAG=false
+RESUME_TARGET=""
+# Discover mode: list all sessions
+DISCOVER_MODE=false
+# Resume all discovered sessions
+RESUME_ALL_MODE=false
+# Parallel resume mode
+PARALLEL_MODE=false
+# Prompt for resume-all mode
+PROMPT_ALL="$DEFAULT_PROMPT"
 # Custom command execution mode
 EXECUTE_MODE=false
 CUSTOM_COMMAND=""
@@ -90,6 +101,246 @@ cleanup_resources() {
 # Set up signal handlers for graceful cleanup
 trap cleanup_on_exit EXIT
 trap interrupt_handler INT TERM
+
+# ============================================================
+# Session Discovery Functions (v2.0)
+# ============================================================
+
+# Encode the current working directory path the way Claude Code does.
+# Rule: replace \, /, : with -
+get_project_encoded_path() {
+    local cwd
+    cwd=$(pwd)
+    echo "$cwd" | sed 's/[\\\/:]/-/g'
+}
+
+# Returns the ~/.claude/projects/<encoded-path> directory if it exists.
+get_project_sessions_dir() {
+    local encoded_path
+    local session_dir
+    encoded_path=$(get_project_encoded_path)
+    session_dir="$HOME/.claude/projects/$encoded_path"
+    if [ -d "$session_dir" ]; then
+        echo "$session_dir"
+        return 0
+    fi
+    return 1
+}
+
+# Try to resolve a human-readable session name.
+# Checks session-env, sessions, and jsonl metadata.
+get_session_name() {
+    local session_id="$1"
+    local name=""
+    local env_file meta_file jsonl_file
+
+    # Try session-env metadata
+    env_file="$HOME/.claude/session-env/${session_id}.json"
+    if [ -f "$env_file" ] && command -v python3 >/dev/null 2>&1; then
+        name=$(python3 -c "
+import json, sys
+try:
+    with open('$env_file') as f:
+        d = json.load(f)
+    print(d.get('name', d.get('sessionName', '')))
+except:
+    pass" 2>/dev/null)
+        if [ -n "$name" ]; then echo "$name"; return 0; fi
+    fi
+
+    # Try sessions directory metadata
+    meta_file="$HOME/.claude/sessions/${session_id}.json"
+    if [ -f "$meta_file" ] && command -v python3 >/dev/null 2>&1; then
+        name=$(python3 -c "
+import json
+with open('$meta_file') as f:
+    d = json.load(f)
+print(d.get('name', d.get('displayName', '')))
+" 2>/dev/null)
+        if [ -n "$name" ]; then echo "$name"; return 0; fi
+    fi
+
+    # Try reading first line of jsonl for metadata
+    local sessions_dir
+    sessions_dir=$(get_project_sessions_dir)
+    if [ -n "$sessions_dir" ]; then
+        jsonl_file="$sessions_dir/${session_id}.jsonl"
+        if [ -f "$jsonl_file" ] && command -v python3 >/dev/null 2>&1; then
+            name=$(python3 -c "
+import json
+with open('$jsonl_file') as f:
+    line = f.readline()
+    d = json.loads(line)
+    print(d.get('sessionName', d.get('name', '')))
+" 2>/dev/null)
+        fi
+    fi
+
+    echo "$name"
+}
+
+# Discover all Claude Code sessions in the current project.
+# Echoes session_id|name|last_modified|size_kb one per line.
+get_all_sessions() {
+    local session_dir
+    session_dir=$(get_project_sessions_dir)
+    if [ -z "$session_dir" ]; then
+        echo "[WARN] No Claude sessions found for current project."
+        echo "[INFO] Project encoded path: $(get_project_encoded_path)"
+        echo "[INFO] Looking in: ~/.claude/projects/"
+        echo "[HINT] Start a Claude CLI session in this directory first."
+        return 1
+    fi
+
+    # List jsonl files sorted by modification time (newest first)
+    local count=0
+    for jsonl_file in "$session_dir"/*.jsonl; do
+        [ -f "$jsonl_file" ] || continue
+        local sid size_kb mtime name
+        sid=$(basename "$jsonl_file" .jsonl)
+        size_kb=$(echo "scale=1; $(stat -f%z "$jsonl_file" 2>/dev/null || stat -c%s "$jsonl_file" 2>/dev/null || echo 0) / 1024" | bc 2>/dev/null || echo "0")
+        mtime=$(stat -c%Y "$jsonl_file" 2>/dev/null || stat -f%m "$jsonl_file" 2>/dev/null || echo "0")
+        name=$(get_session_name "$sid")
+        echo "${sid}|${name:-unnamed}|${mtime}|${size_kb}"
+        count=$((count + 1))
+    done
+
+    if [ "$count" -eq 0 ]; then
+        echo "[WARN] No .jsonl session files found."
+        return 1
+    fi
+    return 0
+}
+
+# Pretty-print discovered sessions.
+show_discovered_sessions() {
+    local session_dir sessions_output
+    session_dir=$(get_project_sessions_dir)
+
+    echo ""
+    echo "========================================"
+    echo " Sessions in current project"
+    echo "========================================"
+    echo "Project: $(pwd)"
+    echo "Encoded: $(get_project_encoded_path)"
+
+    sessions_output=$(get_all_sessions 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo "$sessions_output"
+        return 1
+    fi
+
+    local count
+    count=$(echo "$sessions_output" | wc -l | tr -d ' ')
+    echo "Total:   ${count} session(s)"
+    echo "========================================"
+    echo ""
+
+    local index=1
+    while IFS='|' read -r sid name mtime size_kb; do
+        [ -z "$sid" ] && continue
+        local name_str=""
+        if [ "$name" != "unnamed" ] && [ -n "$name" ]; then
+            name_str=" [${name}]"
+        fi
+        local mtime_fmt
+        mtime_fmt=$(date -d "@$mtime" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "$mtime" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "$mtime")
+        echo "[${index}] ${sid}${name_str}"
+        echo "    Modified : ${mtime_fmt}"
+        echo "    Size     : ${size_kb} KB"
+        if [ "$name" != "unnamed" ] && [ -n "$name" ]; then
+            echo "    Command  : claude-auto-resume --resume \"${name}\""
+        fi
+        echo ""
+        index=$((index + 1))
+    done <<< "$sessions_output"
+
+    echo "========================================"
+    echo " Resume Commands"
+    echo "========================================"
+    echo ""
+    echo "# Resume a specific session:"
+    while IFS='|' read -r sid name mtime size_kb; do
+        [ -z "$sid" ] && continue
+        if [ "$name" != "unnamed" ] && [ -n "$name" ]; then
+            echo "  claude-auto-resume --resume \"${name}\""
+        fi
+    done <<< "$sessions_output"
+    echo ""
+    echo "# Resume ALL sessions (after limit resets):"
+    echo "  claude-auto-resume --resume-all"
+    echo ""
+    echo "# Resume ALL in parallel:"
+    echo "  claude-auto-resume --resume-all --parallel"
+
+    return 0
+}
+
+# Start a single claude --resume <id> process.
+start_single_resume() {
+    local session_id="$1"
+    local prompt="${2:-$DEFAULT_PROMPT}"
+    echo "[RESUME] Starting session: ${session_id}"
+    CLAUDE_PID=""
+    local output
+    output=$(claude --resume "$session_id" --dangerously-skip-permissions -p "$prompt" 2>&1)
+    local ret=$?
+    CLAUDE_PID=""
+    echo "[RESUME] Session ${session_id} finished (exit code: ${ret})"
+    return $ret
+}
+
+# Resume sessions in parallel (background processes).
+start_parallel_resume() {
+    local prompt="$1"
+    shift
+    local -a pids=()
+    local session_count=0
+
+    echo ""
+    echo "[PARALLEL] Launching $# sessions in parallel..."
+    for sid in "$@"; do
+        session_count=$((session_count + 1))
+        claude --resume "$sid" --dangerously-skip-permissions -p "$prompt" &
+        pids+=($!)
+        echo "  [+] Started: ${sid} (PID: ${pids[-1]})"
+    done
+
+    echo ""
+    echo "[PARALLEL] Waiting for all $session_count sessions to complete..."
+    local failed=0
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null
+        local ret=$?
+        if [ $ret -ne 0 ]; then
+            failed=$((failed + 1))
+        fi
+    done
+
+    if [ $failed -gt 0 ]; then
+        echo "[PARALLEL] $failed of $session_count sessions failed."
+    else
+        echo "[PARALLEL] All $session_count sessions completed successfully."
+    fi
+}
+
+# Resume sessions one at a time.
+start_sequential_resume() {
+    local prompt="$1"
+    shift
+    local total=$#
+    local current=0
+
+    echo ""
+    echo "[SEQUENTIAL] Resuming ${total} sessions one by one..."
+    for sid in "$@"; do
+        current=$((current + 1))
+        echo "[${current}/${total}] Resuming session: ${sid}"
+        start_single_resume "$sid" "$prompt" || true
+        echo ""
+    done
+    echo "[SEQUENTIAL] All ${total} sessions processed."
+}
 
 # Cross-platform timeout wrapper (GNU timeout not available on macOS)
 portable_timeout() {
@@ -337,29 +588,45 @@ validate_claude_cli() {
 # Function to show help
 show_help() {
     cat << EOF
-Usage: claude-auto-resume [OPTIONS] [PROMPT]
-
+claude-auto-resume v${VERSION} — Enhanced Edition
+===================================================
 Automatically resume Claude CLI tasks after usage limits are lifted.
+Supports multiple sessions: discover, resume specific, or resume ALL.
 
-OPTIONS:
+USAGE:
+    claude-auto-resume [OPTIONS] [PROMPT]
+
+CORE OPTIONS:
     -p, --prompt PROMPT    Custom prompt (default: "continue")
-    -c, --continue        Continue previous conversation
+    -c, --continue         Continue the most recent conversation
+    -h, --help             Show this help
+    -v, --version          Show version information
+    --check                Show system check information
+    --test-mode SECONDS    [DEV] Simulate usage limit with specified wait time
+    --test-new-format      [DEV] Use with --test-mode to simulate new format
+
+CUSTOM COMMAND:
     -e, --execute COMMAND  Execute custom command after usage limit wait period
-    --cmd COMMAND         Execute custom command after usage limit wait period (alias for -e)
-    -h, --help           Show this help
-    -v, --version        Show version information
-    --check              Show system check information
-    --test-mode SECONDS   [DEV] Simulate usage limit with specified wait time in seconds
-    --test-new-format     [DEV] Use with --test-mode to simulate new format messages
+    --cmd COMMAND          Alias for -e
+
+SESSION MANAGEMENT (NEW in v2.0):
+    --resume <name|id>     Resume a specific session by display name or session ID
+    --discover             List all saved sessions in current project
+    --resume-all           Auto-discover and resume ALL sessions after limit lifts
+    --parallel             (With --resume-all) Resume sessions in parallel
+    --prompt-all PROMPT    Custom prompt for --resume-all (default: "continue")
 
 EXAMPLES:
     claude-auto-resume "implement feature"
     claude-auto-resume -c "continue task"
-    claude-auto-resume -p "write tests"
-    claude-auto-resume -e "npm run dev"     # Executes after usage limit wait
-    claude-auto-resume --cmd "python app.py"  # Executes after usage limit wait
-    claude-auto-resume --test-mode 10 -e "echo test"  # [DEV] Test with 10s wait
-    claude-auto-resume --test-mode 5 --test-new-format "continue"  # [DEV] Test new format
+    claude-auto-resume --resume "auth-module"
+    claude-auto-resume --resume "abc123de-f456-7890"
+    claude-auto-resume --discover
+    claude-auto-resume --resume-all
+    claude-auto-resume --resume-all --parallel
+    claude-auto-resume --resume-all --prompt-all "continue where you left off"
+    claude-auto-resume -e "npm run dev"
+    claude-auto-resume --test-mode 10 -e "echo test"
 
 ⚠️  Uses --dangerously-skip-permissions. Use only in trusted environments.
 ⚠️  Custom command execution allows arbitrary shell commands. Use with caution.
@@ -419,6 +686,35 @@ while [[ $# -gt 0 ]]; do
         --test-new-format)
             TEST_MESSAGE_TYPE="new"
             shift
+            ;;
+        --discover)
+            DISCOVER_MODE=true
+            shift
+            ;;
+        --resume)
+            if [ -z "$2" ]; then
+                echo "[ERROR] Option $1 requires a session name or ID."
+                exit 1
+            fi
+            USE_RESUME_FLAG=true
+            RESUME_TARGET="$2"
+            shift 2
+            ;;
+        --resume-all)
+            RESUME_ALL_MODE=true
+            shift
+            ;;
+        --parallel)
+            PARALLEL_MODE=true
+            shift
+            ;;
+        --prompt-all)
+            if [ -z "$2" ]; then
+                echo "[ERROR] Option $1 requires a prompt argument."
+                exit 1
+            fi
+            PROMPT_ALL="$2"
+            shift 2
             ;;
         --check)
             # Display comprehensive system check information
@@ -500,10 +796,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate command-line arguments
-if [ "$EXECUTE_MODE" = true ] && [ "$USE_CONTINUE_FLAG" = true ]; then
-    echo "[ERROR] Cannot use both custom command execution (-e/--execute/--cmd) and continue flag (-c/--continue)."
-    echo "[HINT] Choose either Claude conversation continuation or custom command execution."
-    echo "[SUGGESTION] Use 'claude-auto-resume --help' to see usage examples."
+if [ "$EXECUTE_MODE" = true ] && { [ "$USE_CONTINUE_FLAG" = true ] || [ "$USE_RESUME_FLAG" = true ] || [ "$RESUME_ALL_MODE" = true ]; }; then
+    echo "[ERROR] Cannot combine -e/--execute with session resume options."
     exit 1
 fi
 
@@ -512,6 +806,54 @@ if [ "$EXECUTE_MODE" = true ] && [ -z "$CUSTOM_COMMAND" ]; then
     echo "[HINT] Provide a command to execute after -e/--execute/--cmd flag."
     echo "[SUGGESTION] Example: claude-auto-resume -e 'npm run dev'"
     exit 1
+fi
+
+# ---- Discovery Mode: list sessions and exit ----
+if [ "$DISCOVER_MODE" = true ]; then
+    show_discovered_sessions
+    exit 0
+fi
+
+# ---- Resume-All: discover sessions first ----
+TARGET_SESSIONS=""
+if [ "$RESUME_ALL_MODE" = true ]; then
+    echo "[RESUME-ALL] Discovering sessions..."
+    sessions_dir=$(get_project_sessions_dir)
+    if [ -z "$sessions_dir" ]; then
+        echo "[ERROR] No Claude sessions found for --resume-all."
+        echo "[HINT] Create Claude sessions in this project first."
+        exit 1
+    fi
+    # Collect all session IDs
+    for jsonl_file in "$sessions_dir"/*.jsonl; do
+        [ -f "$jsonl_file" ] || continue
+        sid=$(basename "$jsonl_file" .jsonl)
+        if [ -n "$TARGET_SESSIONS" ]; then
+            TARGET_SESSIONS="$TARGET_SESSIONS $sid"
+        else
+            TARGET_SESSIONS="$sid"
+        fi
+    done
+    if [ -z "$TARGET_SESSIONS" ]; then
+        echo "[ERROR] No sessions found."
+        exit 1
+    fi
+    count=$(echo "$TARGET_SESSIONS" | wc -w | tr -d ' ')
+    echo "[RESUME-ALL] Found ${count} session(s):"
+    for sid in $TARGET_SESSIONS; do
+        sname=$(get_session_name "$sid")
+        if [ -n "$sname" ]; then
+            echo "  • ${sid} [${sname}]"
+        else
+            echo "  • ${sid}"
+        fi
+    done
+    if [ "$PARALLEL_MODE" = true ]; then
+        echo "[RESUME-ALL] Mode: PARALLEL"
+    else
+        echo "[RESUME-ALL] Mode: SEQUENTIAL"
+    fi
+    echo ""
 fi
 
 # Validate Claude CLI environment before proceeding (skip if in execute mode)
@@ -641,7 +983,12 @@ if [ -n "$LIMIT_MSG" ]; then
       fi
       # Live countdown (interruptible with Ctrl+C)
       while [ $WAIT_SECONDS -gt 0 ]; do
-        printf "\rResuming in %02d:%02d:%02d..." $((WAIT_SECONDS/3600)) $(( (WAIT_SECONDS%3600)/60 )) $((WAIT_SECONDS%60))
+        info_str=""
+        if [ "$RESUME_ALL_MODE" = true ]; then
+          scount=$(echo "$TARGET_SESSIONS" | wc -w | tr -d ' ')
+          info_str=" | ${scount} session(s) queued"
+        fi
+        printf "\rResuming in %02d:%02d:%02d%s..." $((WAIT_SECONDS/3600)) $(( (WAIT_SECONDS%3600)/60 )) $((WAIT_SECONDS%60)) "$info_str"
         # Sleep is interruptible by signal handlers
         sleep 1
         NOW_TIMESTAMP=$(date +%s)
@@ -669,7 +1016,34 @@ if [ -n "$LIMIT_MSG" ]; then
   fi
   
   # Execute the appropriate command based on mode
-  if [ "$EXECUTE_MODE" = true ]; then
+  if [ "$RESUME_ALL_MODE" = true ]; then
+    # ---- RESUME ALL ----
+    echo ""
+    echo "========================================" 
+    echo " RESUME-ALL: Starting all sessions"
+    echo "========================================"
+    if [ "$PARALLEL_MODE" = true ]; then
+      start_parallel_resume "$PROMPT_ALL" $TARGET_SESSIONS
+    else
+      start_sequential_resume "$PROMPT_ALL" $TARGET_SESSIONS
+    fi
+    echo "[RESUME-ALL] Complete. All sessions processed."
+  elif [ "$USE_RESUME_FLAG" = true ]; then
+    # ---- RESUME specific session ----
+    echo "[RESUME] Resuming specific session: $RESUME_TARGET"
+    CLAUDE_PID=""
+    CLAUDE_OUTPUT2=$(claude --resume "$RESUME_TARGET" --dangerously-skip-permissions -p "$CUSTOM_PROMPT" 2>&1)
+    RET_CODE2=$?
+    CLAUDE_PID=""
+    if [ $RET_CODE2 -ne 0 ]; then
+      echo "[ERROR] Session resume failed (exit code: $RET_CODE2)"
+      echo "[DEBUG] Output: $CLAUDE_OUTPUT2"
+      exit 4
+    fi
+    echo "[OK] Session resumed successfully."
+    printf "CLAUDE_OUTPUT:\n"
+    echo "$CLAUDE_OUTPUT2"
+  elif [ "$EXECUTE_MODE" = true ]; then
     echo "Executing custom command after wait period..."
     execute_custom_command "$CUSTOM_COMMAND"
     RET_CODE2=$?
