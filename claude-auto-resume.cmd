@@ -1,10 +1,3 @@
 @echo off
-setlocal
-set SCRIPT=%~dp0claude-auto-resume.ps1
-where pwsh >nul 2>nul
-if %errorlevel%==0 (
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
-) else (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" %*
-)
-endlocal
+REM claude-auto-resume.cmd — Windows CMD wrapper
+pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0claude-auto-resume.ps1" %*
