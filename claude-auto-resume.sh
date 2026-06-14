@@ -779,6 +779,28 @@ while [[ $# -gt 0 ]]; do
             else
                 echo "✗ Failed"
             fi
+            echo ""
+
+            # Session Storage
+            echo "Session Storage:"
+            SESSIONS_DIR=$(get_project_sessions_dir)
+            if [ -n "$SESSIONS_DIR" ]; then
+                echo "  Project dir: $SESSIONS_DIR"
+                SESSION_COUNT=$(ls -1 "$SESSIONS_DIR"/*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+                echo "  Total sessions: ${SESSION_COUNT}"
+                for jsonl_file in "$SESSIONS_DIR"/*.jsonl; do
+                    [ -f "$jsonl_file" ] || continue
+                    sid=$(basename "$jsonl_file" .jsonl)
+                    sname=$(get_session_name "$sid")
+                    if [ -n "$sname" ]; then
+                        echo "    - ${sid} [${sname}]"
+                    else
+                        echo "    - ${sid}"
+                    fi
+                done
+            else
+                echo "  Project dir: NOT FOUND (try starting a Claude session)"
+            fi
             
             exit 0
             ;;
